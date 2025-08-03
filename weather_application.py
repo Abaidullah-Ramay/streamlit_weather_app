@@ -51,14 +51,6 @@ import requests
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.date import DateTrigger
 
-# Add after imports
-import ctypes
-try:
-    portaudio = ctypes.cdll.LoadLibrary('libportaudio.so')
-    st.sidebar.success("PortAudio loaded successfully!")
-except Exception as e:
-    st.sidebar.error(f"PortAudio load failed: {e}")
-
 # Load environment variables at the very beginning
 #load_dotenv()
 OPENAI_API_KEY_FROM_ENV = st.secrets["OPENAI_API_KEY"]
@@ -412,44 +404,7 @@ def second_page():
             st.markdown(f"<p style='color: red;'>An error occurred while fetching weather data: {e}</p>", unsafe_allow_html=True)
             # st.error(traceback.format_exc()) # Keep for debugging if needed
 
-import streamlit as st
-from groq import Groq
-import base64
-import qdrant_client
-
-# Define CSS for custom styling
-css = """
-<style>
-    .st-emotion-cache-1c7y2kd {
-        flex-direction: row-reverse;
-        text-align: right;
-    }
-</style>
-"""
-
-import streamlit as st
-from groq import Groq
-import base64
-import qdrant_client
-
-# Define CSS for custom styling
-css = """
-<style>
-    .st-emotion-cache-1c7y2kd {
-        flex-direction: row-reverse;
-        text-align: right;
-    }
-</style>
-"""
-
 def third_page():
-
-    # FIX: Set library path before any audio imports
-    import os
-    os.environ['LD_LIBRARY_PATH'] = '/usr/lib/x86_64-linux-gnu'
-    if 'LD_LIBRARY_PATH' in os.environ:
-        os.environ['PATH'] = os.environ['PATH'] + ':' + os.environ['LD_LIBRARY_PATH']
-
     st.write(css, unsafe_allow_html=True)
 
     # --- Environment Variable Loading ---
@@ -496,8 +451,10 @@ def third_page():
         st.session_state.vector_store = None
     if "groq_client" not in st.session_state:
         st.session_state.groq_client = None
-    # Removed recording_complete as it's no longer needed
-
+    # Add new state for input reset
+    if "input_reset_key" not in st.session_state:
+        st.session_state.input_reset_key = 0
+        
     # --- UI Layout ---
     st.markdown("<h2 style='color: white; text-align: center;'> 🌦️ Smart Weather Assistant</h2>", unsafe_allow_html=True)
 
@@ -513,6 +470,7 @@ def third_page():
             selected_model = "deepseek-r1-distill-llama-70b"
         elif selected_llm_model == "gemma2-9b":
             selected_model = "gemma2-9b-it"
+            
         # Initialize Chat button
         if st.button("🚀 Initialize Chat", key="init_chat"):
             with st.spinner("Initializing AI components..."):
@@ -544,54 +502,44 @@ def third_page():
                 except Exception as e:
                     st.sidebar.error(f"Initialization failed: {str(e)}")
 
-        # --- NEW Whisper-based Voice Input (STT) ---
+        # --- Modified Voice Input (STT) ---
         st.subheader("Voice Input (STT)")
         try:
-            # Load Whisper model once and cache in session state
-            if "whisper_model" not in st.session_state:
-                import whisper
-                st.session_state.whisper_model = whisper.load_model("base")
-            
-            import sounddevice as sd
-            import numpy as np
-            
-            # Get available devices
-            devices = sd.query_devices()
-            st.sidebar.info(f"Audio devices: {[d['name'] for d in devices]}")
-            
-            if st.button("🎤 Record Voice (10 seconds)"):
-                # Audio recording settings
-                SAMPLE_RATE = 16000
-                RECORD_DURATION = 10
+            from streamlit_mic_recorder import mic_recorder
+            import speech_recognition as sr
+
+            audio_info = mic_recorder(
+                start_prompt="🎤 Start Recording",
+                stop_prompt="⏹️ Stop Recording",
+                key="mic_recorder",
+                format="wav"
+            )
+
+            if audio_info and 'bytes' in audio_info:
+                st.sidebar.info("Transcribing audio...")
                 
-                # Record audio - explicitly select device
-                st.sidebar.info("Recording... Speak now!")
-                audio = sd.rec(
-                    int(RECORD_DURATION * SAMPLE_RATE),
-                    samplerate=SAMPLE_RATE,
-                    channels=1,
-                    dtype='float32',
-                    device=sd.default.device  # Use default device
-                )
-                sd.wait()  # Wait until recording is finished
-                
-                # Transcribe
-                st.sidebar.info("Transcribing...")
-                audio_np = np.squeeze(audio)  # Remove channel dimension
-                result = st.session_state.whisper_model.transcribe(audio_np)
-                text = result["text"]
-                
-                if text.strip():
-                    st.sidebar.success(f"Transcription: {text}")
-                    st.session_state.user_input_value = text
-                    st.rerun()
-                else:
-                    st.sidebar.warning("No speech detected")
+                recognizer = sr.Recognizer()
+                audio_data = sr.AudioData(audio_info['bytes'], audio_info['sample_rate'], 2)
+
+                try:
+                    text = recognizer.recognize_google(audio_data)
+                    st.sidebar.success("Speech recognized!")
                     
+                    # Update state variables
+                    st.session_state.user_input_value = text
+                    # Force input reset on next render
+                    st.session_state.input_reset_key += 1
+                    st.rerun()
+                except sr.UnknownValueError:
+                    st.sidebar.error("Could not understand audio")
+                except sr.RequestError as e:
+                    st.sidebar.error(f"Recognition error: {e}")
+
         except ImportError:
-            st.sidebar.warning("Voice input requires sounddevice and whisper packages")
+            st.sidebar.warning("Install streamlit-mic-recorder and SpeechRecognition")
         except Exception as e:
-            st.sidebar.error(f"Voice input error: {str(e)}")
+            st.sidebar.error(f"Voice error: {e}")
+
 
     # --- Chat Interface ---
     for i, message in enumerate(st.session_state.messages):
@@ -603,8 +551,28 @@ def third_page():
                     with st.spinner("Preparing audio..."): 
                         text_to_speech(clean_text_for_speech)
 
-    prompt = st.chat_input("Ask about documents...") or st.session_state.user_input_value
+    # Create a placeholder for the input field
+    input_placeholder = st.empty()
+    
+    # Only render chat input when needed
+    if st.session_state.user_input_value:
+        # Show input with recognized text
+        prompt = input_placeholder.chat_input(
+            "Ask about documents...", 
+            value=st.session_state.user_input_value,
+            key=f"chat_input_{st.session_state.input_reset_key}"
+        )
+    else:
+        # Show empty input
+        prompt = input_placeholder.chat_input(
+            "Ask about documents...", 
+            key=f"chat_input_{st.session_state.input_reset_key}"
+        )
+    
+    # Use either typed input or voice input
+    prompt = prompt or st.session_state.user_input_value
     st.session_state.user_input_value = None
+
 
     if prompt:
         if st.session_state.conversation and st.session_state.vector_store and st.session_state.groq_client:

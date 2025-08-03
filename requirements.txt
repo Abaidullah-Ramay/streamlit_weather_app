@@ -21,11 +21,4 @@ gtts
 pytz
 twilio
 APScheduler
-openai-whisper
-torch 
-torchvision 
-torchaudio
-streamlit
-sounddevice>=0.4.6
-whisper-openai
 
