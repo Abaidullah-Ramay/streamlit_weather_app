@@ -19,3 +19,5 @@ gtts
 pytz
 twilio
 APScheduler
+openai-whisper
+sounddevice
