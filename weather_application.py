@@ -405,247 +405,231 @@ def second_page():
             # st.error(traceback.format_exc()) # Keep for debugging if needed
 
 def third_page():
-    import os
-    import tempfile
-    import base64
-    import json
-    import openai
-    import streamlit as st
-
-    # This css variable was mentioned in your code but not defined. 
-    # Ensure it is defined in your actual application.
-    css = """
-    <style>
-        /* Add your custom CSS here */
-    </style>
-    """
     st.write(css, unsafe_allow_html=True)
 
-    # --- Secrets / OpenAI ---
-    groq_api_key_to_use = st.secrets.get("GROQ_API_KEY")
-    qdrant_host = st.secrets.get("QDRANT_HOST")
-    qdrant_api_key = st.secrets.get("QDRANT_API_KEY")
-    qdrant_collection = st.secrets.get("QDRANT_COLLECTION_NAME")
-    openai_api_key = st.secrets.get("OPENAI_API_KEY")
-    openai.api_key = openai_api_key
+    # --- Environment Variable Loading ---
+    groq_api_key_to_use = st.secrets["GROQ_API_KEY"]
+    qdrant_host = st.secrets["QDRANT_HOST"]
+    qdrant_api_key = st.secrets["QDRANT_API_KEY"]
+    qdrant_collection = st.secrets["QDRANT_COLLECTION_NAME"]
+    openai_api_key = st.secrets["OPENAI_API_KEY"]
 
-    # --- helper: safe summary for audio_info ---
-    def summarize_audio_info(ai):
-        if ai is None:
-            return "None"
-        summary = {}
-        for k, v in ai.items():
-            try:
-                if isinstance(v, (bytes, bytearray)):
-                    summary[k] = {"type": "bytes", "len": len(v)}
-                elif isinstance(v, str):
-                    summary[k] = {"type": "str", "len": len(v), "preview": v[:200] + ("..." if len(v) > 200 else "")}
-                elif isinstance(v, (int, float, bool)):
-                    summary[k] = {"type": type(v).__name__, "value": v}
-                else:
-                    summary[k] = {"type": type(v).__name__, "repr": repr(v)[:200]}
-            except Exception as e:
-                summary[k] = {"type": type(v).__name__, "repr_error": str(e)}
-        return summary
+    # --- Text-to-Speech with gTTS ---
+    def text_to_speech(text):
+        try:
+            from gtts import gTTS
+            from io import BytesIO
+            import base64
+            
+            # Generate speech using Google's TTS service
+            tts = gTTS(text=text, lang='en')
+            fp = BytesIO()
+            tts.write_to_fp(fp)
+            fp.seek(0)
+            
+            # Create audio player in HTML
+            audio_base64 = base64.b64encode(fp.read()).decode()
+            audio_html = f"""
+                <audio autoplay>
+                <source src="data:audio/mp3;base64,{audio_base64}" type="audio/mp3">
+                Your browser does not support the audio element.
+                </audio>
+            """
+            st.components.v1.html(audio_html, height=0)
+            
+        except Exception as e:
+            st.error(f"TTS Error: {e}")
 
-    # --- Session state init ---
-    if "conversation" not in st.session_state:
+    # --- Session State Management ---
+    if "conversation" not in st.session_state: 
         st.session_state.conversation = None
-    if "messages" not in st.session_state:
+    if "messages" not in st.session_state: 
         st.session_state.messages = []
-    # MODIFICATION: New session state to hold the prompt from STT
-    if "stt_prompt" not in st.session_state:
-        st.session_state.stt_prompt = None
+    if "user_input_value" not in st.session_state: 
+        st.session_state.user_input_value = None
     if "vector_store" not in st.session_state:
         st.session_state.vector_store = None
     if "groq_client" not in st.session_state:
         st.session_state.groq_client = None
-
-
-    # --- title ---
+    # Add new state for input reset
+    if "input_reset_key" not in st.session_state:
+        st.session_state.input_reset_key = 0
+        
+    # --- UI Layout ---
     st.markdown("<h2 style='color: white; text-align: center;'> 🌦️ Smart Weather Assistant</h2>", unsafe_allow_html=True)
 
-    # --- Sidebar: config + STT + debug output ---
     with st.sidebar:
         st.subheader("Configuration")
         models = ["llama3-8b", "qwen2.5-7b", "deepseek-r1-8b", "gemma2-9b"]
         selected_llm_model = st.selectbox("Select Model:", models, key="model_select")
-        # map selection
         if selected_llm_model == "llama3-8b":
             selected_model = "llama3-8b-8192"
         elif selected_llm_model == "qwen2.5-7b":
             selected_model = "qwen/qwen3-32b"
         elif selected_llm_model == "deepseek-r1-8b":
             selected_model = "deepseek-r1-distill-llama-70b"
-        else:
+        elif selected_llm_model == "gemma2-9b":
             selected_model = "gemma2-9b-it"
-
+            
+        # Initialize Chat button
         if st.button("🚀 Initialize Chat", key="init_chat"):
             with st.spinner("Initializing AI components..."):
                 try:
+                    # Initialize embeddings and vector store
                     from langchain_community.embeddings import OpenAIEmbeddings
                     from langchain_qdrant import Qdrant
                     import qdrant_client
-
+                    
                     embeddings = OpenAIEmbeddings(openai_api_key=openai_api_key)
-                    qdrant_client_instance = qdrant_client.QdrantClient(qdrant_host, api_key=qdrant_api_key)
+                    
+                    qdrant_client_instance = qdrant_client.QdrantClient(
+                        qdrant_host,
+                        api_key=qdrant_api_key
+                    )
+                    
                     st.session_state.vector_store = Qdrant(
                         client=qdrant_client_instance,
                         collection_name=qdrant_collection,
                         embeddings=embeddings
                     )
-
+                    
+                    # Initialize Groq client
                     from groq import Groq
                     st.session_state.groq_client = Groq(api_key=groq_api_key_to_use)
-
+                    
                     st.session_state.conversation = True
                     st.sidebar.success("Chat initialized successfully!")
                 except Exception as e:
-                    st.sidebar.error(f"Initialization failed: {e}")
+                    st.sidebar.error(f"Initialization failed: {str(e)}")
 
-        st.markdown("---")
+        # --- Modified Voice Input (STT) ---
         st.subheader("Voice Input (STT)")
-
         try:
             from streamlit_mic_recorder import mic_recorder
-        except Exception as e:
-            st.error("streamlit-mic-recorder NOT installed or failed to import. Please add to requirements.txt.")
-            st.stop()
+            import speech_recognition as sr
 
-        audio_info = mic_recorder(
-            start_prompt="🎤 Start Recording",
-            stop_prompt="⏹️ Stop Recording",
-            key="mic_recorder",
-            format="wav"
-        )
+            audio_info = mic_recorder(
+                start_prompt="🎤 Start Recording",
+                stop_prompt="⏹️ Stop Recording",
+                key="mic_recorder",
+                format="wav"
+            )
 
-        st.sidebar.markdown("### Raw mic_recorder output (DEBUG)")
-        try:
-            st.sidebar.json(summarize_audio_info(audio_info))
-        except Exception:
-            st.sidebar.write("Could not render audio_info summary.")
+            if audio_info and 'bytes' in audio_info:
+                st.sidebar.info("Transcribing audio...")
+                
+                recognizer = sr.Recognizer()
+                audio_data = sr.AudioData(audio_info['bytes'], audio_info['sample_rate'], 2)
 
-        def get_audio_bytes_from_audio_info(ai):
-            if not ai or "bytes" not in ai: return None
-            return ai["bytes"]
-
-        audio_bytes = get_audio_bytes_from_audio_info(audio_info)
-
-        if audio_bytes:
-            st.sidebar.success(f"Found audio bytes — {len(audio_bytes)} bytes")
-            try:
-                st.sidebar.audio(audio_bytes, format="audio/wav")
-            except Exception as e:
-                st.sidebar.write(f"Could not play audio in sidebar: {e}")
-            
-            # --- Transcribe audio bytes ---
-            with st.spinner("Transcribing audio..."):
                 try:
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_audio_file:
-                        tmp_audio_file.write(audio_bytes)
-                        tmp_audio_path = tmp_audio_file.name
+                    text = recognizer.recognize_google(audio_data)
+                    st.sidebar.success("Speech recognized!")
                     
-                    with open(tmp_audio_path, "rb") as audio_file:
-                        transcript = openai.audio.transcriptions.create(
-                            model="whisper-1",
-                            file=audio_file
-                        )
-                    
-                    transcribed_text = transcript.text
-                    st.sidebar.success("Transcription successful!")
-                    st.sidebar.text_area("Transcript (DEBUG)", value=transcribed_text, height=150)
-
-                    # MODIFICATION: Set the STT prompt in session state and rerun
-                    st.session_state.stt_prompt = transcribed_text
-                    
-                    # Cleanup the temp file
-                    os.remove(tmp_audio_path)
-
-                    # MODIFICATION: Use st.rerun() to immediately process the prompt
+                    # Update state variables
+                    st.session_state.user_input_value = text
+                    # Force input reset on next render
+                    st.session_state.input_reset_key += 1
                     st.rerun()
+                except sr.UnknownValueError:
+                    st.sidebar.error("Could not understand audio")
+                except sr.RequestError as e:
+                    st.sidebar.error(f"Recognition error: {e}")
 
-                except Exception as e:
-                    st.sidebar.error(f"Transcription failed: {e}")
-                    if 'tmp_audio_path' in locals() and os.path.exists(tmp_audio_path):
-                        os.remove(tmp_audio_path)
+        except ImportError:
+            st.sidebar.warning("Install streamlit-mic-recorder and SpeechRecognition")
+        except Exception as e:
+            st.sidebar.error(f"Voice error: {e}")
 
 
-    # --- Main area: show chat history and handle input ---
+    # --- Chat Interface ---
     for i, message in enumerate(st.session_state.messages):
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
             if message["role"] == "assistant":
                 if st.button(f"🔊", key=f"tts_button_{i}", help="Play assistant's response"):
-                    clean_text = message['content'].split("**Document Sources:**")[0].strip()
-                    try:
-                        from gtts import gTTS
-                        from io import BytesIO
-                        tts = gTTS(text=clean_text, lang='en')
-                        fp = BytesIO()
-                        tts.write_to_fp(fp)
-                        fp.seek(0)
-                        audio_b64 = base64.b64encode(fp.read()).decode()
-                        st.components.v1.html(f'<audio autoplay src="data:audio/mp3;base64,{audio_b64}"></audio>', height=0)
-                    except Exception as e:
-                        st.error(f"TTS error: {e}")
-    
-    # --- MODIFICATION: Logic to process STT prompt or user input ---
-    prompt = None
-    # Prioritize the prompt from STT
-    if st.session_state.stt_prompt:
-        prompt = st.session_state.stt_prompt
-        # Clear it so it's not reused on the next rerun
-        st.session_state.stt_prompt = None
-    else:
-        # Fallback to the chat input if no STT prompt is available
-        prompt = st.chat_input("Ask about documents...")
+                    clean_text_for_speech = message['content'].split("**Document Sources:**")[0].strip()
+                    with st.spinner("Preparing audio..."): 
+                        text_to_speech(clean_text_for_speech)
 
-    # --- Process prompt (your original flow) ---
+    # Create a placeholder for the input field
+    input_placeholder = st.empty()
+    
+    # Only render chat input when needed
+    if st.session_state.user_input_value:
+        # Show input with recognized text
+        prompt = input_placeholder.chat_input(
+            "Ask about documents...", 
+            value=st.session_state.user_input_value,
+            key=f"chat_input_{st.session_state.input_reset_key}"
+        )
+    else:
+        # Show empty input
+        prompt = input_placeholder.chat_input(
+            "Ask about documents...", 
+            key=f"chat_input_{st.session_state.input_reset_key}"
+        )
+    
+    # Use either typed input or voice input
+    prompt = prompt or st.session_state.user_input_value
+    st.session_state.user_input_value = None
+
+
     if prompt:
         if st.session_state.conversation and st.session_state.vector_store and st.session_state.groq_client:
             st.session_state.messages.append({"role": "user", "content": prompt})
+            
             with st.chat_message("user"):
                 st.markdown(prompt)
-
+            
             with st.spinner("Assistant is thinking..."):
                 try:
+                    # Perform similarity search
                     docs = st.session_state.vector_store.similarity_search(prompt, k=3)
+                    
+                    # Build context from documents
                     context = "\n\n".join([doc.page_content for doc in docs])
+                    
+                    # Create chat messages with context
                     messages = [
                         {
                             "role": "system",
                             "content": (
                                 "You are a helpful assistant and professional writer. "
-                                "Always use Markdown formatting with headings, bullet points, and short paragraphs. "
-                                "Highlight key terms in bold. Use the following context:\n"
+                                "When answering, always use Markdown formatting. "
+                                "Structure your response with clear headings (## or ###), bullet points, and short paragraphs. "
+                                "If the answer has multiple parts, use numbered or bulleted lists. "
+                                "Highlight key terms in bold. "
+                                "Use the following context to answer the user's question:\n"
                                 f"{context}\n"
                                 "If the context is not enough, use your general knowledge."
                             )
                         },
                         {"role": "user", "content": prompt}
                     ]
-
+                    
+                    # Generate response using Groq
                     response = st.session_state.groq_client.chat.completions.create(
                         messages=messages,
                         model=selected_model,
                     )
-
+                    
+                    # Format response with sources
                     final_answer = response.choices[0].message.content
                     if docs:
                         sources = "\n\n**Document Sources:**\n" + "\n".join(
                             [f"- {doc.metadata.get('source', 'Unknown source')}" for doc in docs]
                         )
                         final_answer += sources
-
+                    
                     st.session_state.messages.append({"role": "assistant", "content": final_answer})
                     
-                    # MODIFICATION: Replace deprecated function and rerun to show the latest message
-                    st.rerun()
-
+                    with st.chat_message("assistant"):
+                        st.markdown(final_answer)
                 except Exception as e:
                     error_message = f"Sorry, an unexpected error occurred: {e}"
                     st.error(error_message)
                     st.session_state.messages.append({"role": "assistant", "content": error_message})
+            st.rerun()
         else:
             st.warning("Chat not initialized. Please select a model and click 'Initialize Chat' in the sidebar.")
 
