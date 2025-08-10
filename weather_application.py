@@ -455,6 +455,8 @@ def third_page():
         st.session_state.groq_client = None
     if "input_reset_key" not in st.session_state:
         st.session_state.input_reset_key = 0
+    if "transcription_success" not in st.session_state:
+        st.session_state.transcription_success = False
 
     # --- title ---
     st.markdown("<h2 style='color: white; text-align: center;'> 🌦️ Smart Weather Assistant</h2>", unsafe_allow_html=True)
@@ -586,14 +588,11 @@ def third_page():
 
         # --- Provide an uploader test so you can check transcription independent of recorder ---
         st.markdown("#### Test transcription with upload (helps isolate issues)")
-        test_file = st.file_uploader("Upload a WAV/MP3 to test transcription", type=["wav", "mp3", "m4a", "ogg"])
-        if test_file is not None:
-            st.sidebar.info("Testing transcription on uploaded file...")
-            with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(test_file.name)[1]) as tf:
-                tf.write(test_file.read())
-                test_path = tf.name
-
-            # attempt transcription on uploaded file below (reuse the same function)
+        test_file = st.file_uploader(
+            "Upload a WAV/MP3 to test transcription", 
+            type=["wav", "mp3", "m4a", "ogg"],
+            key="test_file_uploader"
+        )
 
         # --- If we have bytes, save to temp file and call OpenAI (robust) ---
         def robust_transcribe(tmp_path):
@@ -668,8 +667,9 @@ def third_page():
                 tmp_audio_path = tf.name
             do_transcribe = True
         elif test_file is not None:
-            # use test_path created earlier
-            tmp_audio_path = test_path
+            with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(test_file.name)[1]) as tf:
+                tf.write(test_file.read())
+                tmp_audio_path = tf.name
             do_transcribe = True
 
         if do_transcribe and tmp_audio_path:
@@ -677,30 +677,34 @@ def third_page():
             text, err = robust_transcribe(tmp_audio_path)
 
             if text:
-                st.sidebar.success("Transcription successful (preview below)")
+                st.sidebar.success("Transcription successful!")
                 st.sidebar.text_area("Transcript (DEBUG)", value=text, height=150)
-                # set into session state so main UI picks it up
+                
+                # Set as user input
                 st.session_state.user_input_value = text
                 st.session_state.input_reset_key += 1
-                # CLEANUP temp file after setting state (best-effort)
+                st.session_state.transcription_success = True
+                
+                # Reset recorder states to prevent reprocessing
+                if audio_bytes:
+                    st.session_state.mic_recorder = None
+                if test_file is not None:
+                    st.session_state.test_file_uploader = None
+                
+                # Cleanup temp file
                 try:
                     os.remove(tmp_audio_path)
                 except Exception:
                     pass
-                # rerun so the main input is re-rendered with prefill
-                st.experimental_rerun()
             else:
                 st.sidebar.error(f"Transcription failed: {err}")
-                st.sidebar.markdown("**Full error** (for debugging):")
-                st.sidebar.text(str(err))
-
                 # cleanup file
                 try:
                     os.remove(tmp_audio_path)
                 except Exception:
                     pass
 
-    # --- Main area: show chat history and input (backward-compatible) ---
+    # --- Main area: show chat history ---
     for i, message in enumerate(st.session_state.messages):
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
@@ -720,39 +724,47 @@ def third_page():
                     except Exception as e:
                         st.error(f"TTS error: {e}")
 
-    # input placeholder and robust prefill (chat_input or text_input fallback)
-    input_placeholder = st.empty()
-    chat_key = f"chat_input_{st.session_state.input_reset_key}"
-
+    # --- Handle input with transcription success check ---
     prompt = None
-    try:
-        # try to prefill chat_input (works on newer Streamlit)
-        prompt = input_placeholder.chat_input(
-            "Ask about documents...",
-            value=st.session_state.user_input_value or "",
-            key=chat_key
-        )
-    except TypeError:
-        # older Streamlit where chat_input doesn't accept value
-        st.sidebar.info("Streamlit version doesn't support chat_input(value=...). Using text_input fallback.")
-        prompt = input_placeholder.text_input(
-            "Ask about documents...",
-            value=st.session_state.user_input_value or "",
-            key=f"text_input_fallback_{st.session_state.input_reset_key}"
-        )
-    except Exception as e:
-        st.error(f"Unexpected error rendering input widget: {e}")
-        prompt = input_placeholder.text_input(
-            "Ask about documents...",
-            value=st.session_state.user_input_value or "",
-            key=f"text_input_final_fallback_{st.session_state.input_reset_key}"
-        )
+    if st.session_state.transcription_success:
+        # Clear success flag to prevent reprocessing
+        st.session_state.transcription_success = False
+        # Use transcribed text as prompt
+        prompt = st.session_state.user_input_value
+        st.session_state.user_input_value = None  # Reset after use
+    else:
+        # Regular input handling
+        input_placeholder = st.empty()
+        chat_key = f"chat_input_{st.session_state.input_reset_key}"
+        
+        try:
+            # try to prefill chat_input (works on newer Streamlit)
+            prompt = input_placeholder.chat_input(
+                "Ask about documents...",
+                value=st.session_state.user_input_value or "",
+                key=chat_key
+            )
+        except TypeError:
+            # older Streamlit where chat_input doesn't accept value
+            st.sidebar.info("Streamlit version doesn't support chat_input(value=...). Using text_input fallback.")
+            prompt = input_placeholder.text_input(
+                "Ask about documents...",
+                value=st.session_state.user_input_value or "",
+                key=f"text_input_fallback_{st.session_state.input_reset_key}"
+            )
+        except Exception as e:
+            st.error(f"Unexpected error rendering input widget: {e}")
+            prompt = input_placeholder.text_input(
+                "Ask about documents...",
+                value=st.session_state.user_input_value or "",
+                key=f"text_input_final_fallback_{st.session_state.input_reset_key}"
+            )
 
-    # Clear the stored prefill after we read it (so next time it's not reused)
-    if prompt:
-        st.session_state.user_input_value = None
+        # Clear the stored prefill after we read it (so next time it's not reused)
+        if prompt:
+            st.session_state.user_input_value = None
 
-    # --- Process prompt (your original flow) ---
+    # --- Process prompt ---
     if prompt:
         if st.session_state.conversation and st.session_state.vector_store and st.session_state.groq_client:
             st.session_state.messages.append({"role": "user", "content": prompt})
@@ -796,10 +808,8 @@ def third_page():
                     error_message = f"Sorry, an unexpected error occurred: {e}"
                     st.error(error_message)
                     st.session_state.messages.append({"role": "assistant", "content": error_message})
-            st.experimental_rerun()
         else:
             st.warning("Chat not initialized. Please select a model and click 'Initialize Chat' in the sidebar.")
-
 
 if selected == "Description":
     st.markdown("""
