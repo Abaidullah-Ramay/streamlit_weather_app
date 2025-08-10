@@ -412,46 +412,41 @@ def third_page():
 
     st.write(css, unsafe_allow_html=True)
 
-    # --- Environment Variable Loading ---
+    # --- Environment Variables ---
     groq_api_key_to_use = st.secrets["GROQ_API_KEY"]
     qdrant_host = st.secrets["QDRANT_HOST"]
     qdrant_api_key = st.secrets["QDRANT_API_KEY"]
     qdrant_collection = st.secrets["QDRANT_COLLECTION_NAME"]
     openai_api_key = st.secrets["OPENAI_API_KEY"]
 
-    # Set OpenAI key for Whisper
     openai.api_key = openai_api_key
 
-    # --- Text-to-Speech with gTTS ---
+    # --- TTS ---
     def text_to_speech(text):
         try:
             from gtts import gTTS
             from io import BytesIO
             import base64
-            
             tts = gTTS(text=text, lang='en')
             fp = BytesIO()
             tts.write_to_fp(fp)
             fp.seek(0)
-            
             audio_base64 = base64.b64encode(fp.read()).decode()
             audio_html = f"""
                 <audio autoplay>
                 <source src="data:audio/mp3;base64,{audio_base64}" type="audio/mp3">
-                Your browser does not support the audio element.
                 </audio>
             """
             st.components.v1.html(audio_html, height=0)
-            
         except Exception as e:
             st.error(f"TTS Error: {e}")
 
-    # --- Session State Management ---
-    if "conversation" not in st.session_state: 
+    # --- Session State ---
+    if "conversation" not in st.session_state:
         st.session_state.conversation = None
-    if "messages" not in st.session_state: 
+    if "messages" not in st.session_state:
         st.session_state.messages = []
-    if "user_input_value" not in st.session_state: 
+    if "user_input_value" not in st.session_state:
         st.session_state.user_input_value = None
     if "vector_store" not in st.session_state:
         st.session_state.vector_store = None
@@ -459,10 +454,11 @@ def third_page():
         st.session_state.groq_client = None
     if "input_reset_key" not in st.session_state:
         st.session_state.input_reset_key = 0
-        
-    # --- UI Layout ---
+
+    # --- Title ---
     st.markdown("<h2 style='color: white; text-align: center;'> 🌦️ Smart Weather Assistant</h2>", unsafe_allow_html=True)
 
+    # --- Sidebar ---
     with st.sidebar:
         st.subheader("Configuration")
         models = ["llama3-8b", "qwen2.5-7b", "deepseek-r1-8b", "gemma2-9b"]
@@ -475,36 +471,28 @@ def third_page():
             selected_model = "deepseek-r1-distill-llama-70b"
         elif selected_llm_model == "gemma2-9b":
             selected_model = "gemma2-9b-it"
-            
+
         if st.button("🚀 Initialize Chat", key="init_chat"):
             with st.spinner("Initializing AI components..."):
                 try:
                     from langchain_community.embeddings import OpenAIEmbeddings
                     from langchain_qdrant import Qdrant
                     import qdrant_client
-                    
                     embeddings = OpenAIEmbeddings(openai_api_key=openai_api_key)
-                    
-                    qdrant_client_instance = qdrant_client.QdrantClient(
-                        qdrant_host,
-                        api_key=qdrant_api_key
-                    )
-                    
+                    qdrant_client_instance = qdrant_client.QdrantClient(qdrant_host, api_key=qdrant_api_key)
                     st.session_state.vector_store = Qdrant(
                         client=qdrant_client_instance,
                         collection_name=qdrant_collection,
                         embeddings=embeddings
                     )
-                    
                     from groq import Groq
                     st.session_state.groq_client = Groq(api_key=groq_api_key_to_use)
-                    
                     st.session_state.conversation = True
                     st.sidebar.success("Chat initialized successfully!")
                 except Exception as e:
                     st.sidebar.error(f"Initialization failed: {str(e)}")
 
-        # --- Voice Input (STT) with Whisper ---
+        # --- Voice Input with Whisper ---
         st.subheader("Voice Input (STT)")
         try:
             audio_info = mic_recorder(
@@ -516,26 +504,19 @@ def third_page():
 
             if audio_info and 'bytes' in audio_info:
                 st.sidebar.info("Transcribing audio with Whisper...")
-
-                # Save audio to a temp file
                 with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmpfile:
                     tmpfile.write(audio_info['bytes'])
                     tmpfile_path = tmpfile.name
 
                 try:
-                    # Whisper API call
                     with open(tmpfile_path, "rb") as audio_file:
                         transcript = openai.audio.transcriptions.create(
                             model="whisper-1",
                             file=audio_file
                         )
-
-                    text = transcript.text
-                    st.sidebar.success("Speech recognized!")
-                    st.session_state.user_input_value = text
+                    st.session_state.user_input_value = transcript.text
                     st.session_state.input_reset_key += 1
                     st.rerun()
-
                 except Exception as e:
                     st.sidebar.error(f"Whisper transcription error: {e}")
 
@@ -544,77 +525,64 @@ def third_page():
         except Exception as e:
             st.sidebar.error(f"Voice error: {e}")
 
-
-    # --- Chat Interface ---
+    # --- Show Chat History ---
     for i, message in enumerate(st.session_state.messages):
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
             if message["role"] == "assistant":
                 if st.button(f"🔊", key=f"tts_button_{i}", help="Play assistant's response"):
-                    clean_text_for_speech = message['content'].split("**Document Sources:**")[0].strip()
-                    with st.spinner("Preparing audio..."): 
-                        text_to_speech(clean_text_for_speech)
+                    clean_text = message['content'].split("**Document Sources:**")[0].strip()
+                    with st.spinner("Preparing audio..."):
+                        text_to_speech(clean_text)
 
+    # --- Chat Input (fixed prefill) ---
     input_placeholder = st.empty()
-    
-    if st.session_state.user_input_value:
-        prompt = input_placeholder.chat_input(
-            "Ask about documents...", 
-            value=st.session_state.user_input_value,
-            key=f"chat_input_{st.session_state.input_reset_key}"
-        )
-    else:
-        prompt = input_placeholder.chat_input(
-            "Ask about documents...", 
-            key=f"chat_input_{st.session_state.input_reset_key}"
-        )
-    
-    prompt = prompt or st.session_state.user_input_value
-    st.session_state.user_input_value = None
+    prompt = input_placeholder.chat_input(
+        "Ask about documents...",
+        value=st.session_state.user_input_value or "",
+        key=f"chat_input_{st.session_state.input_reset_key}"
+    )
 
+    # Clear prefill after submission
+    if prompt:
+        st.session_state.user_input_value = None
+
+    # --- Process prompt ---
     if prompt:
         if st.session_state.conversation and st.session_state.vector_store and st.session_state.groq_client:
             st.session_state.messages.append({"role": "user", "content": prompt})
-            
             with st.chat_message("user"):
                 st.markdown(prompt)
-            
+
             with st.spinner("Assistant is thinking..."):
                 try:
                     docs = st.session_state.vector_store.similarity_search(prompt, k=3)
                     context = "\n\n".join([doc.page_content for doc in docs])
-                    
                     messages = [
                         {
                             "role": "system",
                             "content": (
                                 "You are a helpful assistant and professional writer. "
-                                "When answering, always use Markdown formatting. "
-                                "Structure your response with clear headings, bullet points, and short paragraphs. "
-                                "If the answer has multiple parts, use numbered lists. "
-                                "Highlight key terms in bold. "
-                                "Use the following context to answer the user's question:\n"
+                                "Always use Markdown formatting with headings, bullet points, "
+                                "short paragraphs, and highlight key terms in bold. "
+                                "Use the following context:\n"
                                 f"{context}\n"
-                                "If the context is not enough, use your general knowledge."
+                                "If context is not enough, use general knowledge."
                             )
                         },
                         {"role": "user", "content": prompt}
                     ]
-                    
                     response = st.session_state.groq_client.chat.completions.create(
                         messages=messages,
                         model=selected_model,
                     )
-                    
                     final_answer = response.choices[0].message.content
                     if docs:
                         sources = "\n\n**Document Sources:**\n" + "\n".join(
                             [f"- {doc.metadata.get('source', 'Unknown source')}" for doc in docs]
                         )
                         final_answer += sources
-                    
                     st.session_state.messages.append({"role": "assistant", "content": final_answer})
-                    
                     with st.chat_message("assistant"):
                         st.markdown(final_answer)
                 except Exception as e:
