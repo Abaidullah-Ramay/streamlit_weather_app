@@ -407,43 +407,42 @@ def second_page():
 def third_page():
     import os
     import tempfile
-    import openai
     import base64
-    from streamlit_mic_recorder import mic_recorder
+    import json
+    import openai
+    import streamlit as st
 
-    st.write(css, unsafe_allow_html=True)
+    st.write(css, unsafe_allow_html=True)  # keep your css variable
 
-    # --- Environment Variables ---
-    groq_api_key_to_use = st.secrets["GROQ_API_KEY"]
-    qdrant_host = st.secrets["QDRANT_HOST"]
-    qdrant_api_key = st.secrets["QDRANT_API_KEY"]
-    qdrant_collection = st.secrets["QDRANT_COLLECTION_NAME"]
-    openai_api_key = st.secrets["OPENAI_API_KEY"]
-
+    # --- Secrets / OpenAI ---
+    groq_api_key_to_use = st.secrets.get("GROQ_API_KEY")
+    qdrant_host = st.secrets.get("QDRANT_HOST")
+    qdrant_api_key = st.secrets.get("QDRANT_API_KEY")
+    qdrant_collection = st.secrets.get("QDRANT_COLLECTION_NAME")
+    openai_api_key = st.secrets.get("OPENAI_API_KEY")
     openai.api_key = openai_api_key
 
-    # --- Text-to-Speech with gTTS ---
-    def text_to_speech(text):
-        try:
-            from gtts import gTTS
-            from io import BytesIO
+    # --- helper: safe summary for audio_info (so we can render in sidebar) ---
+    def summarize_audio_info(ai):
+        if ai is None:
+            return "None"
+        summary = {}
+        for k, v in ai.items():
+            try:
+                if isinstance(v, (bytes, bytearray)):
+                    summary[k] = {"type": "bytes", "len": len(v)}
+                elif isinstance(v, str):
+                    summary[k] = {"type": "str", "len": len(v), "preview": v[:200] + ("..." if len(v) > 200 else "")}
+                elif isinstance(v, (int, float, bool)):
+                    summary[k] = {"type": type(v).__name__, "value": v}
+                else:
+                    # fallback repr (safe)
+                    summary[k] = {"type": type(v).__name__, "repr": repr(v)[:200]}
+            except Exception as e:
+                summary[k] = {"type": type(v).__name__, "repr_error": str(e)}
+        return summary
 
-            tts = gTTS(text=text, lang='en')
-            fp = BytesIO()
-            tts.write_to_fp(fp)
-            fp.seek(0)
-            audio_base64 = base64.b64encode(fp.read()).decode()
-            audio_html = f"""
-                <audio autoplay>
-                <source src="data:audio/mp3;base64,{audio_base64}" type="audio/mp3">
-                Your browser does not support the audio element.
-                </audio>
-            """
-            st.components.v1.html(audio_html, height=0)
-        except Exception as e:
-            st.error(f"TTS Error: {e}")
-
-    # --- Session State ---
+    # --- Session state init ---
     if "conversation" not in st.session_state:
         st.session_state.conversation = None
     if "messages" not in st.session_state:
@@ -457,21 +456,22 @@ def third_page():
     if "input_reset_key" not in st.session_state:
         st.session_state.input_reset_key = 0
 
-    # --- Title ---
+    # --- title ---
     st.markdown("<h2 style='color: white; text-align: center;'> 🌦️ Smart Weather Assistant</h2>", unsafe_allow_html=True)
 
-    # --- Sidebar: Config + STT ---
+    # --- Sidebar: config + STT + debug output ---
     with st.sidebar:
         st.subheader("Configuration")
         models = ["llama3-8b", "qwen2.5-7b", "deepseek-r1-8b", "gemma2-9b"]
         selected_llm_model = st.selectbox("Select Model:", models, key="model_select")
+        # map selection
         if selected_llm_model == "llama3-8b":
             selected_model = "llama3-8b-8192"
         elif selected_llm_model == "qwen2.5-7b":
             selected_model = "qwen/qwen3-32b"
         elif selected_llm_model == "deepseek-r1-8b":
             selected_model = "deepseek-r1-distill-llama-70b"
-        elif selected_llm_model == "gemma2-9b":
+        else:
             selected_model = "gemma2-9b-it"
 
         if st.button("🚀 Initialize Chat", key="init_chat"):
@@ -482,12 +482,7 @@ def third_page():
                     import qdrant_client
 
                     embeddings = OpenAIEmbeddings(openai_api_key=openai_api_key)
-
-                    qdrant_client_instance = qdrant_client.QdrantClient(
-                        qdrant_host,
-                        api_key=qdrant_api_key
-                    )
-
+                    qdrant_client_instance = qdrant_client.QdrantClient(qdrant_host, api_key=qdrant_api_key)
                     st.session_state.vector_store = Qdrant(
                         client=qdrant_client_instance,
                         collection_name=qdrant_collection,
@@ -500,118 +495,264 @@ def third_page():
                     st.session_state.conversation = True
                     st.sidebar.success("Chat initialized successfully!")
                 except Exception as e:
-                    st.sidebar.error(f"Initialization failed: {str(e)}")
+                    st.sidebar.error(f"Initialization failed: {e}")
 
-        # --- Voice Input (STT) using Whisper ---
+        st.markdown("---")
         st.subheader("Voice Input (STT)")
+
+        # try to import the recorder component
         try:
-            audio_info = mic_recorder(
-                start_prompt="🎤 Start Recording",
-                stop_prompt="⏹️ Stop Recording",
-                key="mic_recorder",
-                format="wav"
-            )
-
-            if audio_info and 'bytes' in audio_info:
-                st.sidebar.info("Transcribing audio with Whisper...")
-                # Save bytes to a temp file, send to OpenAI Whisper
-                tmpfile_path = None
-                try:
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmpfile:
-                        tmpfile.write(audio_info['bytes'])
-                        tmpfile_path = tmpfile.name
-
-                    with open(tmpfile_path, "rb") as audio_file:
-                        # Use the OpenAI audio transcription endpoint
-                        transcript = openai.audio.transcriptions.create(
-                            model="whisper-1",
-                            file=audio_file
-                        )
-
-                    text = getattr(transcript, "text", None) or transcript.get("text") if isinstance(transcript, dict) else None
-                    if not text:
-                        # older/newer OpenAI response shapes: try both
-                        try:
-                            text = transcript["text"]
-                        except Exception:
-                            text = str(transcript)
-
-                    st.session_state.user_input_value = text
-                    st.session_state.input_reset_key += 1
-                    st.sidebar.success("Speech recognized!")
-                    # Rerun to let UI pick up new state (and new input_reset_key)
-                    st.rerun()
-
-                except Exception as e:
-                    st.sidebar.error(f"Whisper transcription error: {e}")
-                finally:
-                    # Best-effort cleanup
-                    if tmpfile_path and os.path.exists(tmpfile_path):
-                        try:
-                            os.remove(tmpfile_path)
-                        except Exception:
-                            pass
-
-        except ImportError:
-            st.sidebar.warning("Install streamlit-mic-recorder and openai in requirements.txt")
+            from streamlit_mic_recorder import mic_recorder  # component
         except Exception as e:
-            st.sidebar.error(f"Voice error: {e}")
+            st.error("streamlit-mic-recorder NOT installed or failed to import. Please add to requirements.txt.")
+            st.stop()
 
-    # --- Chat History ---
+        # --- recorder call ---
+        audio_info = mic_recorder(
+            start_prompt="🎤 Start Recording",
+            stop_prompt="⏹️ Stop Recording",
+            key="mic_recorder",
+            format="wav"
+        )
+
+        # --- Debug: raw audio_info summary ---
+        st.sidebar.markdown("### Raw mic_recorder output (DEBUG)")
+        try:
+            st.sidebar.json(summarize_audio_info(audio_info))
+        except Exception:
+            st.sidebar.write("Could not render audio_info summary (non-serializable).")
+
+        # --- Extract bytes robustly from many possible shapes ---
+        def get_audio_bytes_from_audio_info(ai):
+            if not ai:
+                return None, "audio_info is empty/None"
+
+            # Common keys returned by different forks: 'bytes', 'blob', 'base64', 'dataURL', 'audio'
+            # Try them in order of likelihood.
+            # 1) bytes / bytearray
+            if "bytes" in ai and isinstance(ai["bytes"], (bytes, bytearray)):
+                return bytes(ai["bytes"]), None
+
+            # 2) base64 string (raw)
+            for k in ("base64", "base_64", "b64"):
+                if k in ai and isinstance(ai[k], str):
+                    try:
+                        return base64.b64decode(ai[k]), None
+                    except Exception as e:
+                        return None, f"base64 decode error for key {k}: {e}"
+
+            # 3) blob / dataURL like "data:audio/wav;base64,AAAA..."
+            if "blob" in ai and isinstance(ai["blob"], str):
+                s = ai["blob"]
+                if s.startswith("data:"):
+                    try:
+                        header, b64 = s.split(",", 1)
+                        return base64.b64decode(b64), None
+                    except Exception as e:
+                        return None, f"dataURL decode error: {e}"
+                else:
+                    # might be plain base64 string
+                    try:
+                        return base64.b64decode(s), None
+                    except Exception as e:
+                        return None, f"unknown blob format: {e}"
+
+            # 4) some components put audio under 'audio' or 'recording'
+            for k in ("audio", "recording"):
+                if k in ai:
+                    v = ai[k]
+                    if isinstance(v, (bytes, bytearray)):
+                        return bytes(v), None
+                    if isinstance(v, str):
+                        try:
+                            return base64.b64decode(v), None
+                        except Exception as e:
+                            return None, f"decoding {k} string failed: {e}"
+
+            return None, "No recognized audio bytes in audio_info"
+
+        audio_bytes, audio_err = get_audio_bytes_from_audio_info(audio_info)
+
+        # Show whether we found bytes
+        if audio_bytes:
+            st.sidebar.success(f"Found audio bytes — {len(audio_bytes)} bytes")
+            # Playback in sidebar so you can confirm
+            try:
+                st.sidebar.audio(audio_bytes, format="audio/wav")
+            except Exception as e:
+                st.sidebar.write(f"Could not play audio in sidebar: {e}")
+        else:
+            st.sidebar.warning(f"No audio bytes extracted: {audio_err}")
+
+        # --- Provide an uploader test so you can check transcription independent of recorder ---
+        st.markdown("#### Test transcription with upload (helps isolate issues)")
+        test_file = st.file_uploader("Upload a WAV/MP3 to test transcription", type=["wav", "mp3", "m4a", "ogg"])
+        if test_file is not None:
+            st.sidebar.info("Testing transcription on uploaded file...")
+            with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(test_file.name)[1]) as tf:
+                tf.write(test_file.read())
+                test_path = tf.name
+
+            # attempt transcription on uploaded file below (reuse the same function)
+
+        # --- If we have bytes, save to temp file and call OpenAI (robust) ---
+        def robust_transcribe(tmp_path):
+            """
+            Try multiple OpenAI client call patterns to handle different SDK versions.
+            Returns (text_or_none, error_or_none)
+            """
+            last_exc = None
+            # try 1: openai.Audio.transcribe(model, file)  (common example)
+            try:
+                with open(tmp_path, "rb") as f:
+                    res = openai.Audio.transcribe("whisper-1", f)
+                # res may be a dict or object
+                if isinstance(res, dict):
+                    text = res.get("text")
+                else:
+                    text = getattr(res, "text", None) or (res.get("text") if isinstance(res, dict) else None)
+                if text:
+                    return text, None
+            except Exception as e:
+                last_exc = e
+
+            # try 2: openai.Audio.transcriptions.create(...)
+            try:
+                with open(tmp_path, "rb") as f:
+                    # some SDKs expose this
+                    res = openai.Audio.transcriptions.create(model="whisper-1", file=f)
+                if isinstance(res, dict):
+                    text = res.get("text")
+                else:
+                    text = getattr(res, "text", None)
+                if text:
+                    return text, None
+            except Exception as e:
+                last_exc = e
+
+            # try 3: openai.audio.transcriptions.create(...) (lowercase package var)
+            try:
+                with open(tmp_path, "rb") as f:
+                    res = openai.audio.transcriptions.create(model="whisper-1", file=f)
+                if isinstance(res, dict):
+                    text = res.get("text")
+                else:
+                    text = getattr(res, "text", None)
+                if text:
+                    return text, None
+            except Exception as e:
+                last_exc = e
+
+            # try 4: older pattern (just in case)
+            try:
+                with open(tmp_path, "rb") as f:
+                    res = openai.Transcription.create(model="whisper-1", file=f)
+                if isinstance(res, dict):
+                    text = res.get("text")
+                else:
+                    text = getattr(res, "text", None)
+                if text:
+                    return text, None
+            except Exception as e:
+                last_exc = e
+
+            return None, f"All transcription attempts failed. Last exception: {repr(last_exc)}"
+
+        # If we have audio bytes available OR test_file was uploaded -> attempt transcription
+        do_transcribe = False
+        tmp_audio_path = None
+
+        if audio_bytes:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tf:
+                tf.write(audio_bytes)
+                tmp_audio_path = tf.name
+            do_transcribe = True
+        elif test_file is not None:
+            # use test_path created earlier
+            tmp_audio_path = test_path
+            do_transcribe = True
+
+        if do_transcribe and tmp_audio_path:
+            st.sidebar.info(f"Saved temp audio to {tmp_audio_path} — attempting transcription...")
+            text, err = robust_transcribe(tmp_audio_path)
+
+            if text:
+                st.sidebar.success("Transcription successful (preview below)")
+                st.sidebar.text_area("Transcript (DEBUG)", value=text, height=150)
+                # set into session state so main UI picks it up
+                st.session_state.user_input_value = text
+                st.session_state.input_reset_key += 1
+                # CLEANUP temp file after setting state (best-effort)
+                try:
+                    os.remove(tmp_audio_path)
+                except Exception:
+                    pass
+                # rerun so the main input is re-rendered with prefill
+                st.experimental_rerun()
+            else:
+                st.sidebar.error(f"Transcription failed: {err}")
+                st.sidebar.markdown("**Full error** (for debugging):")
+                st.sidebar.text(str(err))
+
+                # cleanup file
+                try:
+                    os.remove(tmp_audio_path)
+                except Exception:
+                    pass
+
+    # --- Main area: show chat history and input (backward-compatible) ---
     for i, message in enumerate(st.session_state.messages):
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
             if message["role"] == "assistant":
                 if st.button(f"🔊", key=f"tts_button_{i}", help="Play assistant's response"):
+                    # reuse your text to speech
                     clean_text = message['content'].split("**Document Sources:**")[0].strip()
-                    with st.spinner("Preparing audio..."):
-                        text_to_speech(clean_text)
+                    try:
+                        from gtts import gTTS
+                        from io import BytesIO
+                        tts = gTTS(text=clean_text, lang='en')
+                        fp = BytesIO()
+                        tts.write_to_fp(fp)
+                        fp.seek(0)
+                        audio_b64 = base64.b64encode(fp.read()).decode()
+                        st.components.v1.html(f'<audio autoplay src="data:audio/mp3;base64,{audio_b64}"></audio>', height=0)
+                    except Exception as e:
+                        st.error(f"TTS error: {e}")
 
-    # --- Chat Input with backward-compatible prefill ---
+    # input placeholder and robust prefill (chat_input or text_input fallback)
     input_placeholder = st.empty()
     chat_key = f"chat_input_{st.session_state.input_reset_key}"
 
     prompt = None
-    # Prefer chat_input with value if available; if not, fallback to text_input (prefill supported)
     try:
-        # Attempt to call chat_input with "value" (newer Streamlit)
+        # try to prefill chat_input (works on newer Streamlit)
         prompt = input_placeholder.chat_input(
             "Ask about documents...",
             value=st.session_state.user_input_value or "",
             key=chat_key
         )
-    except TypeError as te:
-        # Likely: chat_input() got an unexpected keyword argument 'value'
-        # Fallback: use text_input (which allows prefill) in the same placeholder spot
-        st.sidebar.info("Falling back to text_input for prefilled message (Streamlit version compatibility).")
-        prompt = input_placeholder.text_input(
-            "Ask about documents...",
-            value=st.session_state.user_input_value or "",
-            key=f"text_input_fallback_{st.session_state.input_reset_key}"
-        )
-    except AttributeError:
-        # chat_input not available on older Streamlit: fallback to text_input
-        st.sidebar.info("chat_input not available: using text_input fallback.")
+    except TypeError:
+        # older Streamlit where chat_input doesn't accept value
+        st.sidebar.info("Streamlit version doesn't support chat_input(value=...). Using text_input fallback.")
         prompt = input_placeholder.text_input(
             "Ask about documents...",
             value=st.session_state.user_input_value or "",
             key=f"text_input_fallback_{st.session_state.input_reset_key}"
         )
     except Exception as e:
-        # Any other unexpected error while rendering input
-        st.error(f"Error rendering chat input widget: {e}")
-        # final fallback - plain text_input
+        st.error(f"Unexpected error rendering input widget: {e}")
         prompt = input_placeholder.text_input(
             "Ask about documents...",
             value=st.session_state.user_input_value or "",
             key=f"text_input_final_fallback_{st.session_state.input_reset_key}"
         )
 
-    # Clear the prefill after it's been shown (but keep prompt value so it processes)
+    # Clear the stored prefill after we read it (so next time it's not reused)
     if prompt:
         st.session_state.user_input_value = None
 
-    # --- Process prompt and generate assistant reply ---
+    # --- Process prompt (your original flow) ---
     if prompt:
         if st.session_state.conversation and st.session_state.vector_store and st.session_state.groq_client:
             st.session_state.messages.append({"role": "user", "content": prompt})
@@ -622,7 +763,6 @@ def third_page():
                 try:
                     docs = st.session_state.vector_store.similarity_search(prompt, k=3)
                     context = "\n\n".join([doc.page_content for doc in docs])
-
                     messages = [
                         {
                             "role": "system",
@@ -652,13 +792,11 @@ def third_page():
                     st.session_state.messages.append({"role": "assistant", "content": final_answer})
                     with st.chat_message("assistant"):
                         st.markdown(final_answer)
-
                 except Exception as e:
                     error_message = f"Sorry, an unexpected error occurred: {e}"
                     st.error(error_message)
                     st.session_state.messages.append({"role": "assistant", "content": error_message})
-            # rerun to refresh UI (and preserve consistent keys)
-            st.rerun()
+            st.experimental_rerun()
         else:
             st.warning("Chat not initialized. Please select a model and click 'Initialize Chat' in the sidebar.")
 
