@@ -405,6 +405,11 @@ def second_page():
             # st.error(traceback.format_exc()) # Keep for debugging if needed
 
 def third_page():
+    import os
+    import tempfile
+    import openai
+    from streamlit_mic_recorder import mic_recorder
+
     st.write(css, unsafe_allow_html=True)
 
     # --- Environment Variable Loading ---
@@ -414,6 +419,9 @@ def third_page():
     qdrant_collection = st.secrets["QDRANT_COLLECTION_NAME"]
     openai_api_key = st.secrets["OPENAI_API_KEY"]
 
+    # Set OpenAI key for Whisper
+    openai.api_key = openai_api_key
+
     # --- Text-to-Speech with gTTS ---
     def text_to_speech(text):
         try:
@@ -421,13 +429,11 @@ def third_page():
             from io import BytesIO
             import base64
             
-            # Generate speech using Google's TTS service
             tts = gTTS(text=text, lang='en')
             fp = BytesIO()
             tts.write_to_fp(fp)
             fp.seek(0)
             
-            # Create audio player in HTML
             audio_base64 = base64.b64encode(fp.read()).decode()
             audio_html = f"""
                 <audio autoplay>
@@ -451,7 +457,6 @@ def third_page():
         st.session_state.vector_store = None
     if "groq_client" not in st.session_state:
         st.session_state.groq_client = None
-    # Add new state for input reset
     if "input_reset_key" not in st.session_state:
         st.session_state.input_reset_key = 0
         
@@ -471,11 +476,9 @@ def third_page():
         elif selected_llm_model == "gemma2-9b":
             selected_model = "gemma2-9b-it"
             
-        # Initialize Chat button
         if st.button("🚀 Initialize Chat", key="init_chat"):
             with st.spinner("Initializing AI components..."):
                 try:
-                    # Initialize embeddings and vector store
                     from langchain_community.embeddings import OpenAIEmbeddings
                     from langchain_qdrant import Qdrant
                     import qdrant_client
@@ -493,7 +496,6 @@ def third_page():
                         embeddings=embeddings
                     )
                     
-                    # Initialize Groq client
                     from groq import Groq
                     st.session_state.groq_client = Groq(api_key=groq_api_key_to_use)
                     
@@ -502,12 +504,9 @@ def third_page():
                 except Exception as e:
                     st.sidebar.error(f"Initialization failed: {str(e)}")
 
-        # --- Modified Voice Input (STT) ---
+        # --- Voice Input (STT) with Whisper ---
         st.subheader("Voice Input (STT)")
         try:
-            from streamlit_mic_recorder import mic_recorder
-            import speech_recognition as sr
-
             audio_info = mic_recorder(
                 start_prompt="🎤 Start Recording",
                 stop_prompt="⏹️ Stop Recording",
@@ -516,27 +515,32 @@ def third_page():
             )
 
             if audio_info and 'bytes' in audio_info:
-                st.sidebar.info("Transcribing audio...")
-                
-                recognizer = sr.Recognizer()
-                audio_data = sr.AudioData(audio_info['bytes'], audio_info['sample_rate'], 2)
+                st.sidebar.info("Transcribing audio with Whisper...")
+
+                # Save audio to a temp file
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmpfile:
+                    tmpfile.write(audio_info['bytes'])
+                    tmpfile_path = tmpfile.name
 
                 try:
-                    text = recognizer.recognize_google(audio_data)
+                    # Whisper API call
+                    with open(tmpfile_path, "rb") as audio_file:
+                        transcript = openai.audio.transcriptions.create(
+                            model="whisper-1",
+                            file=audio_file
+                        )
+
+                    text = transcript.text
                     st.sidebar.success("Speech recognized!")
-                    
-                    # Update state variables
                     st.session_state.user_input_value = text
-                    # Force input reset on next render
                     st.session_state.input_reset_key += 1
                     st.rerun()
-                except sr.UnknownValueError:
-                    st.sidebar.error("Could not understand audio")
-                except sr.RequestError as e:
-                    st.sidebar.error(f"Recognition error: {e}")
+
+                except Exception as e:
+                    st.sidebar.error(f"Whisper transcription error: {e}")
 
         except ImportError:
-            st.sidebar.warning("Install streamlit-mic-recorder and SpeechRecognition")
+            st.sidebar.warning("Install streamlit-mic-recorder and OpenAI")
         except Exception as e:
             st.sidebar.error(f"Voice error: {e}")
 
@@ -551,28 +555,22 @@ def third_page():
                     with st.spinner("Preparing audio..."): 
                         text_to_speech(clean_text_for_speech)
 
-    # Create a placeholder for the input field
     input_placeholder = st.empty()
     
-    # Only render chat input when needed
     if st.session_state.user_input_value:
-        # Show input with recognized text
         prompt = input_placeholder.chat_input(
             "Ask about documents...", 
             value=st.session_state.user_input_value,
             key=f"chat_input_{st.session_state.input_reset_key}"
         )
     else:
-        # Show empty input
         prompt = input_placeholder.chat_input(
             "Ask about documents...", 
             key=f"chat_input_{st.session_state.input_reset_key}"
         )
     
-    # Use either typed input or voice input
     prompt = prompt or st.session_state.user_input_value
     st.session_state.user_input_value = None
-
 
     if prompt:
         if st.session_state.conversation and st.session_state.vector_store and st.session_state.groq_client:
@@ -583,21 +581,17 @@ def third_page():
             
             with st.spinner("Assistant is thinking..."):
                 try:
-                    # Perform similarity search
                     docs = st.session_state.vector_store.similarity_search(prompt, k=3)
-                    
-                    # Build context from documents
                     context = "\n\n".join([doc.page_content for doc in docs])
                     
-                    # Create chat messages with context
                     messages = [
                         {
                             "role": "system",
                             "content": (
                                 "You are a helpful assistant and professional writer. "
                                 "When answering, always use Markdown formatting. "
-                                "Structure your response with clear headings (## or ###), bullet points, and short paragraphs. "
-                                "If the answer has multiple parts, use numbered or bulleted lists. "
+                                "Structure your response with clear headings, bullet points, and short paragraphs. "
+                                "If the answer has multiple parts, use numbered lists. "
                                 "Highlight key terms in bold. "
                                 "Use the following context to answer the user's question:\n"
                                 f"{context}\n"
@@ -607,13 +601,11 @@ def third_page():
                         {"role": "user", "content": prompt}
                     ]
                     
-                    # Generate response using Groq
                     response = st.session_state.groq_client.chat.completions.create(
                         messages=messages,
                         model=selected_model,
                     )
                     
-                    # Format response with sources
                     final_answer = response.choices[0].message.content
                     if docs:
                         sources = "\n\n**Document Sources:**\n" + "\n".join(
@@ -632,6 +624,7 @@ def third_page():
             st.rerun()
         else:
             st.warning("Chat not initialized. Please select a model and click 'Initialize Chat' in the sidebar.")
+
 
 if selected == "Description":
     st.markdown("""
