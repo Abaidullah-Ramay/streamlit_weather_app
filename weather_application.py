@@ -184,10 +184,6 @@ def plot_weather_data(list_days, list_temp, list_humidity, list_pressure, list_w
     plt.tight_layout(rect=[0, 0, 1, 0.96])
     return fig
 
-# timezone is used to convert UTC time from API to local time. It need timedelta for offset/difference.
-# dt.datetime.fromtimestamp() is used to convert timestamp (UNIX) to datetime object where dt.datetime is a class from datetime module.
-# astimezone() is used to convert UTC timezone to local location timezone.
-
 def display_weekly_forecast(data):
     try:
         st.write("=" * 88)
