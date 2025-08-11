@@ -430,6 +430,13 @@ def third_page():
     qdrant_api_key = st.secrets["QDRANT_API_KEY"]
     qdrant_collection = st.secrets["QDRANT_COLLECTION_NAME"]
     openai_api_key = st.secrets["OPENAI_API_KEY"]
+    
+    # NEW: Safely get ElevenLabs API key
+    try:
+        elevenlabs_api_key = st.secrets["ELEVENLABS_API_KEY"]
+    except KeyError:
+        elevenlabs_api_key = None
+        st.sidebar.warning("ElevenLabs API key not found. Voice input disabled.")
 
     # --- Text-to-Speech with gTTS ---
     def text_to_speech(text):
@@ -512,43 +519,75 @@ def third_page():
                 except Exception as e:
                     st.sidebar.error(f"Initialization failed: {str(e)}")
 
-        # --- Modified Voice Input (STT) using OpenAI Whisper ---
+        # --- MODIFIED VOICE INPUT (ElevenLabs STT) ---
         st.subheader("Voice Input (STT)")
-        try:
-            audio_info = mic_recorder(
-                start_prompt="🎤 Start Recording",
-                stop_prompt="⏹️ Stop Recording",
-                key="mic_recorder",
-                format="wav"
-            )
+        
+        # Only show STT if API key is available
+        if elevenlabs_api_key:
+            try:
+                from streamlit_mic_recorder import mic_recorder
+                import requests
+                from pydub import AudioSegment
+                import io
 
-            if audio_info and 'bytes' in audio_info and st.session_state.openai_client:
-                st.sidebar.info("Transcribing audio...")
-                
-                audio_bytes = audio_info['bytes']
-                audio_file = BytesIO(audio_bytes)
-                audio_file.name = "recorded_audio.wav"
+                audio_info = mic_recorder(
+                    start_prompt="🎤 Start Recording",
+                    stop_prompt="⏹️ Stop Recording",
+                    key="mic_recorder",
+                    format="wav"
+                )
 
-                try:
-                    # Use OpenAI Whisper for transcription
-                    transcript = st.session_state.openai_client.audio.transcriptions.create(
-                        model="whisper-1",
-                        file=audio_file
-                    )
-                    text = transcript.text
-                    st.sidebar.success("Speech recognized!")
+                if audio_info and 'bytes' in audio_info:
+                    st.sidebar.info("Transcribing audio...")
+                    
+                    try:
+                        # Convert to ElevenLabs compatible format (16kHz mono)
+                        audio = AudioSegment.from_wav(io.BytesIO(audio_info['bytes']))
+                        audio = audio.set_frame_rate(16000).set_channels(1)
+                        converted_audio = io.BytesIO()
+                        audio.export(converted_audio, format="wav")
+                        audio_bytes = converted_audio.getvalue()
 
-                    # Update state variables
-                    st.session_state.user_input_value = text
-                    st.session_state.input_reset_key += 1
-                    st.rerun()
-                except Exception as e:
-                    st.sidebar.error(f"Transcription error: {e}")
+                        # ElevenLabs STT API Call
+                        url = "https://api.elevenlabs.io/v1/speech-to-text"
+                        headers = {
+                            "xi-api-key": elevenlabs_api_key,
+                            "Content-Type": "audio/wav"
+                        }
+                        params = {
+                            "model_id": "eleven_monolingual_v1",
+                        }
 
-        except ImportError:
-            st.sidebar.warning("Please install all required libraries: `streamlit-mic-recorder`, `openai`")
-        except Exception as e:
-            st.sidebar.error(f"Voice input error: {e}")
+                        response = requests.post(
+                            url, 
+                            headers=headers, 
+                            params=params,
+                            data=audio_bytes,
+                            timeout=10  # Add timeout to prevent hanging
+                        )
+
+                        if response.status_code == 200:
+                            result = response.json()
+                            text = result.get("text", "").strip()
+                            if text:
+                                st.sidebar.success("Speech recognized!")
+                                st.session_state.user_input_value = text
+                                st.session_state.input_reset_key += 1
+                                st.rerun()
+                            else:
+                                st.sidebar.error("No speech detected")
+                        else:
+                            st.sidebar.error(f"STT Error: {response.status_code} - {response.text}")
+
+                    except Exception as e:
+                        st.sidebar.error(f"Audio processing error: {e}")
+
+            except ImportError:
+                st.sidebar.warning("Install streamlit-mic-recorder, requests, and pydub")
+            except Exception as e:
+                st.sidebar.error(f"Voice error: {e}")
+        else:
+            st.warning("ElevenLabs API key missing. Add ELEVENLABS_API_KEY to secrets to enable voice input.")
 
     # --- Chat Interface ---
     for i, message in enumerate(st.session_state.messages):

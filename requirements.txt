@@ -23,3 +23,6 @@ twilio
 APScheduler
 openai
 gTTS
+pydub
+requests
+elevenlabs
